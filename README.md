@@ -1,107 +1,156 @@
-# StackedDiffFS
+# StackedFS
 
-**A horizontal, merge-safe filesystem for AI agents**
+**A layered FUSE filesystem with pre/post hook layers.**
 
-StackedDiffFS (StackedFS) solves a common problem when using multiple AI agents with your codebase: how can multiple agents work on the same files without stepping on each other's changes? Instead of requiring agents to coordinate or merge changes manually, StackedDiffFS provides each agent with their own view of your files while keeping the original intact.
+StackedFS is a FUSE-based filesystem that mirrors a real directory through a configurable chain of Python "layers". Each layer can intercept file operations (read, write, open, getattr, readdir, etc.) with pre and post hooks — enabling transparent content transformation, redaction, logging, access control, and more.
 
 ## Rationale
 
-When multiple AI agents modify the same files:
-- **Merge conflicts** become frequent and tedious
-- **Loss of context** occurs when changes overwrite each other
-- **Reproducibility** is hard to maintain across agent runs
+AI agents often need to read sensitive files (`.env`, configs with secrets, API keys) during development. StackedFS makes it possible to surface a **sanitized view** of a real directory by running file data through a layer chain:
 
-StackedFS uses an overlay filesystem approach where:
-- The **base layer** contains your original files (read-only)
-- Each **agent layer** stores modifications specific to that agent
-- The **working layer** shows the merged view with agent changes taking precedence
-- **Conflict detection** alerts you when modifications diverge from the base
+- A **secrets layer** replaces real credentials with substitutes on-the-fly
+- A **logging layer** records every filesystem access
+- A **filter layer** can hide or redirect certain paths
+- Layers compose — chain them together for powerful pipelines
 
-### Example Scenario
+Beyond security, layers open the door to exposing other datastores as filesystem primitives (e.g., a Redis key-value store as a `/redis/` directory, or an agent's conversational context as editable files).
 
-Imagine two AI agents working on the same project:
+## How It Works
 
-1. **Agent Claude** wants to refactor `utils.py`
-2. **Agent Cline** wants to add features to `utils.py`
+```
+stackedfs mount -l secrets_layer.py -l echo_layer.py /real/project /mnt/safe
+```
 
-Without StackedFS:
-- Both agents start with the same version
-- Claude refactors and saves
-- Siri adds features and saves
-- One set of changes is lost or they conflict
+The command above:
+1. Loads `secrets_layer.py` and `echo_layer.py` as the layer chain
+2. Mirrors `/real/project` at the mount point `/mnt/safe`
+3. Every file read passes through both layers' hooks — secrets get redacted, operations get logged
 
-With StackedFS:
-- Claude's changes go to `agents/claude/utils.py`
-- Siri's changes go to `agents/siri/utils.py`
-- Both can work independently
-- Conflicts are detected when both modify the same file
+```
+User/program  →  [echo pre]  →  [secrets pre]  →  [FUSE]  →  [secrets post]  →  [echo post]  →  result
+```
+
+Pre-hooks run forward through the chain (outermost first); post-hooks run in reverse (innermost first).
 
 ## Features
 
-- **Overlay Filesystem**: View your filesystem with agent-specific modifications layered on top
-- **Agent Isolation**: Each agent sees their own modified files while preserving the base layer
-- **Conflict Detection**: Automatic detection when modified files differ from the base layer
-- **CLI Interface**: Simple commands to manage repositories and agents
-- **direnv Integration**: Automatic environment setup for agent workspaces
-- **FUSE-based**: Works with any tool that reads files through the mounted filesystem
+- **Mirror any directory** through a FUSE mount point
+- **Pluggable Python layers** — each layer is a `.py` file with optional hook functions
+- **Pre/post hook model** — transform paths, filter data, intercept operations
+- **Dynamic loading** — layers loaded at mount time via `-l` flag or JSON config
+- **Composable** — multiple layers chain together in order
+- **FUSE-based** — works with any tool that reads files through the mounted filesystem
 
 ## Quick Start
 
-### 1. Initialize a Repository
-
-Create a new StackedFS repository:
+### 1. Validate Layers
 
 ```bash
-stackedfs init ~/my-agent-repo
+stackedfs -l examples/secrets_layer.py
+# Loaded 1 layer(s):
+#   - secrets_layer
+# Layers validated successfully.
 ```
 
-This creates the directory structure:
-```
-my-agent-repo/
-├── base/              # Original files (read-only)
-├── agents/            # Agent-specific overlays
-├── work/              # Current working directory
-└── agents.json        # Agent configuration
-```
-
-### 2. Add an Agent
-
-Add an agent to the repository:
+### 2. Mount the Filesystem
 
 ```bash
-stackedfs agent add claude --repo ~/my-agent-repo
+# Mount with a single layer
+stackedfs mount -l examples/secrets_layer.py /real/project /mnt/safe
+
+# Mount with multiple layers
+stackedfs mount -l examples/secrets_layer.py -l examples/echo_layer.py /real/project /mnt/safe
+
+# Run in foreground with debug
+stackedfs mount -l examples/secrets_layer.py /real/project /mnt/safe -f -d
 ```
 
-### 3. Mount the Filesystem
+### 3. Use the Mount Point
 
-Mount the StackedFS filesystem:
+Files at the mount point mirror the source directory, but data passes through all enabled layers:
 
 ```bash
-# Set the active agent
-export AGENT_ID=claude
+# A .env file with real secrets
+cat /real/project/.env
+# API_KEY=sk-abc123...
+# PASSWORD=hunter2
 
-# Mount the filesystem
-stackedfs mount ~/my-agent-repo ~/mount-point
+# Read through the mount point — secrets redacted
+cat /mnt/safe/.env
+# API_KEY=<OPENAI_API_KEY_REDACTED>
+# PASSWORD=***
 ```
 
-### 4. Working with Files
-
-When you write to the mounted filesystem, files go to your agent's overlay:
+### 4. Unmount
 
 ```bash
-# Create a new file (goes to claude's overlay)
-echo "new content" > ~/mount-point/newfile.txt
-
-# Modify an existing file (goes to claude's overlay)
-echo "modified" > ~/mount-point/basefile.txt
+stackedfs unmount /mnt/safe
 ```
 
-### 5. View Status
+### Layer Configuration via JSON
 
-Check repository status and conflicts:
+```json
+["examples/secrets_layer.py", "examples/echo_layer.py"]
+```
 
 ```bash
-stackedfs status ~/my-agent-repo
+stackedfs mount -f stacks.json /real/project /mnt/safe
+```
+
+## Layer API
+
+Each layer is a Python file that defines any combination of these hook functions:
+
+### Hooks
+
+| Hook | Signature | Called When | Pre/Post |
+|------|-----------|-------------|----------|
+| `init` | `()` | Layer is loaded | — |
+| `pre_open` | `(path) -> str\|None` | Before opening a file | Pre |
+| `pre_read` | `(path) -> str\|None` | Before reading an open file | Pre |
+| `post_read` | `(path, data) -> bytes\|None` | After reading from a file | Post |
+| `pre_write` | `(path, data) -> (str, bytes)\|None` | Before writing to a file | Pre |
+| `post_write` | `(path)` | After writing to a file | Post |
+| `pre_getattr` | `(path) -> str\|None` | Before getting file attributes | Pre |
+| `post_getattr` | `(path, attr)` | After getting file attributes | Post |
+| `pre_readdir` | `(path) -> str\|None` | Before listing a directory | Pre |
+| `post_readdir` | `(path, entries) -> list\|None` | After listing a directory | Post |
+| `pre_create` | `(path) -> str\|None` | Before creating a file | Pre |
+| `post_create` | `(path)` | After creating a file | Post |
+| `pre_unlink` | `(path) -> str\|None` | Before deleting a file | Pre |
+| `post_unlink` | `(path)` | After deleting a file | Post |
+
+Return `None` to pass through unchanged, or a modified value to override.
+
+### Ordering
+
+Pre-hooks run **forward** through the layer list (first layer → last layer).
+Post-hooks run **in reverse** (last layer → first layer).
+
+Example with layers `[A, B]`:
+- `pre_read`: `A(path) → B(path) → actual read`
+- `post_read`: `actual data → B(data) → A(data) → result`
+
+### Example Layer
+
+```python
+# secrets_layer.py
+import re
+
+SECRET_PATTERNS = [
+    (re.compile(r'(AKIA[0-9A-Z]{16})'), '<AWS_KEY_REDACTED>'),
+    (re.compile(r'(?i)(password\s*[=:]\s*)\S+'), r'\1***'),
+]
+
+def post_read(path, data):
+    """Replace secrets in text files."""
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError:
+        return None  # pass binary through unchanged
+    for pattern, replacement in SECRET_PATTERNS:
+        text = pattern.sub(replacement, text)
+    return text.encode("utf-8")
 ```
 
 ## Installation
@@ -114,23 +163,14 @@ stackedfs status ~/my-agent-repo
 
 #### Recommended: Use conda-forge
 
-The easiest way to install is using conda-forge, which provides prebuilt FUSE libraries:
-
 ```bash
-# Create a new conda environment
 conda create -n stackedfs python=3.10
 conda activate stackedfs
-
-# Install FUSE dependencies from conda-forge
 conda install -c conda-forge fuse3 pyfuse3
-
-# Install StackedFS
 pip install -e .
 ```
 
 #### Manual Installation
-
-If you don't use conda, you'll need to install FUSE development libraries manually:
 
 **Linux (Ubuntu/Debian):**
 ```bash
@@ -144,163 +184,67 @@ brew install macfuse
 pip install pyfuse3
 ```
 
-**Note:** On some systems, you may need to set `PKG_CONFIG_PATH` to help pyfuse3 find fuse3:
-```bash
-export PKG_CONFIG_PATH="/usr/local/lib/pkgconfig:$PKG_CONFIG_PATH"
-```
-
-For macOS, install macFUSE:
-```bash
-brew install macfuse
-```
-
 ### Setup
 
 ```bash
-# Clone the repository
 git clone https://github.com/yourusername/stackedfs.git
 cd stackedfs
-
-# Install dependencies (check/install required FUSE libraries)
-./scripts/check-deps.sh    # Check if dependencies are satisfied
-# OR
-./scripts/install-deps.sh  # Install missing dependencies
-
-# Install stackedfs
 pip install -e .
-
-# Verify installation
 stackedfs --help
 ```
 
 ## CLI Commands
 
 ```bash
-# Initialize a repository
-stackedfs init <path>                # Create new stackedfs repository
+# Validate layers
+stackedfs -l layer1.py -l layer2.py
+stackedfs -f stacks.json
 
-# Mount/unmount filesystem
-stackedfs mount <repo> <mount_point> # Mount filesystem at mount point
-stackedfs unmount <mount_point>      # Unmount filesystem
+# Mount filesystem
+stackedfs mount -l layer.py /source/path /mount/point
+stackedfs mount -f stacks.json /source/path /mount/point
 
-# Agent management
-stackedfs agent add <name>           # Add a new agent
-stackedfs agent list                 # List all agents
-stackedfs agent remove <name>        # Remove an agent
+# Mount options
+stackedfs mount -l layer.py /source /mnt/point -f -d
 
-# Configuration
-stackedfs status <repo>              # Show repository status
-stackedfs conflicts <repo>           # Show conflicts
-stackedfs direnv <repo>              # Generate direnv configuration
+# Unmount
+stackedfs unmount /mount/point
 ```
 
-For help with any command:
-```bash
-stackedfs <command> --help
-```
+## Examples
 
-## Environment Variables
+### secrets_layer.py
 
-StackedFS uses the following environment variables:
-
-- `AGENT_ID` - Active agent identifier (must be set before mounting)
-- `STACKEDFS_WORKDIR` - Directory containing working files (set by direnv)
-- `STACKEDFS_BASE` - Path to base layer (set by direnv)
-
-## Directory Structure
-
-```
- Repository Root
-├── base/              # Original files (shared, read-only)
-│   ├── file1.txt
-│   └── subdir/
-│       └── file2.txt
-├── agents/            # Agent-specific overlays
-│   ├── agent1/        # Agent 1's modifications
-│   │   ├── file1.txt  # Modified version
-│   │   └── new.txt    # New file
-│   └── agent2/        # Agent 2's modifications
-│       └── ...
-├── work/              # Current working layer
-│   └── (symlinks to base or agent files)
-└── agents.json        # Agent configuration
-```
-
-## Conflict Detection
-
-StackedFS automatically detects when files differ from the base:
-
-```json
-{
-  "conflicts": [
-    {
-      "path": "/modified_file.txt",
-      "agent": "agent1",
-      "timestamp": "2024-01-01T12:00:00Z"
-    }
-  ]
-}
-```
-
-## direnv Integration
-
-To automatically set up your environment when entering a repository:
+Redacts AWS keys, OpenAI tokens, GitHub tokens, passwords, secrets, and API keys from text files. Binary files pass through unchanged.
 
 ```bash
-# Generate direnv configuration
-stackedfs direnv ~/my-agent-repo > ~/my-agent-repo/.envrc
-
-# direnv will automatically use this when you cd into the directory
+stackedfs mount -l examples/secrets_layer.py /home/user/project /mnt/safe
 ```
 
-Note: The `direnv` command outputs the configuration content to stdout. You need to redirect it to `.envrc` in your repository.
+### echo_layer.py
+
+Logs every filesystem operation to stderr. Useful for debugging and understanding layer interaction.
+
+```bash
+stackedfs mount -l examples/echo_layer.py /home/user/project /mnt/test
+```
 
 ## Testing
 
-StackedFS uses pytest for its test suite. The tests cover repository management, path resolution, file operations, and conflict detection.
-
-### Prerequisites
-
-Before running tests, ensure dependencies are installed:
-
 ```bash
-# Check dependencies
-./scripts/check-deps.sh
-
-# Or install missing dependencies
-./scripts/install-deps.sh
-```
-
-### Running Tests
-
-```bash
-# Install dependencies first
-pip install -e . pytest pytest-cov pyfuse3
-
-# Run all tests
-pytest
-
-# Run with verbose output
+pip install -e . pytest pytest-asyncio
 pytest -v
-
-# Run with coverage
-pytest --cov=stackedfs --cov-report=html
 ```
-
-**Note:** Tests require pyfuse3 for FUSE operations. The test suite verifies agent management, conflict detection, and path resolution logic.
 
 ### Test Structure
 
-- `tests/conftest.py` - Shared fixtures (e.g., `temp_repo`)
-- `tests/test_stackedfs.py` - Unit and integration tests organized by functionality
-
-### Writing Tests
-
-When writing tests for StackedFS:
-1. Use the `temp_repo` fixture to get a temporary repository structure
-2. Test agent isolation by creating files in different agent layers
-3. Verify conflict detection by checking hash comparisons
-4. Test FUSE operations through the `StackedFS` class directly
+- `tests/conftest.py` — Shared fixtures (`source_dir`, `layer_dir`)
+- `tests/test_stackedfs.py` — Unit and integration tests:
+  - Layer loading and hook dispatch
+  - LayerChain ordering (forward/reverse)
+  - Secrets layer example behavior
+  - FUSE operations (getattr, lookup, readdir, open, read, write, create, unlink, mkdir, rmdir, rename)
+  - FUSE operations with active layers
 
 ## License
 
@@ -308,30 +252,9 @@ MIT License
 
 ## Contributing
 
-We welcome contributions! Here's how to get started:
-
 1. Fork the repository
 2. Create a feature branch (`git checkout -b feature/amazing-feature`)
 3. Make your changes
 4. Run tests: `pytest`
 5. Ensure all tests pass
 6. Submit a pull request
-
-### Development Setup
-
-For development, you'll need:
-- Python 3.8+
-- pytest for testing
-- pyfuse3 for FUSE operations (requires FUSE development libraries)
-- pytest-asyncio for async test support
-
-Install in development mode:
-```bash
-pip install -e . pytest pytest-cov pytest-asyncio
-```
-
-Use the provided scripts to manage dependencies:
-```bash
-./scripts/check-deps.sh     # Verify dependencies
-./scripts/install-deps.sh   # Install missing dependencies
-```
