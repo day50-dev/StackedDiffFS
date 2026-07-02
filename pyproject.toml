@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "stackedfs"
 version = "1.0.0"
-description = "A horizontal, merge-safe filesystem for AI agents"
+description = "A layered FUSE filesystem with pre/post hook layers"
 readme = "README.md"
 requires-python = ">=3.8"
 dependencies = [

@@ -1,3 +1,3 @@
-"""StackedDiffFS (StackedFS) - A horizontal, merge-safe filesystem for AI agents."""
+"""StackedFS - A layered FUSE filesystem with pre/post hook layers."""
 
-__version__ = "1.0.0"
+__version__ = "2.0.0"

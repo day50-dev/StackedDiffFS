@@ -1,30 +1,24 @@
-"""Pytest configuration for StackedDiffFS (StackedFS) tests."""
+"""Pytest configuration for StackedFS tests."""
 
+import tempfile
+from pathlib import Path
 import pytest
-import trio
 
 
 @pytest.fixture
-def temp_repo(tmp_path):
-    """Create a temporary repository for testing."""
-    repo_path = tmp_path / "test_repo"
-    repo_path.mkdir()
-    
-    base_path = repo_path / "base"
-    base_path.mkdir()
-    
-    agents_path = repo_path / "agents"
-    agents_path.mkdir()
-    
-    work_path = repo_path / "work"
-    work_path.mkdir()
-    
-    return repo_path
+def source_dir(tmp_path):
+    """Create a temporary source directory with test files."""
+    src = tmp_path / "source"
+    src.mkdir()
+    (src / "hello.txt").write_text("hello world")
+    (src / "subdir").mkdir()
+    (src / "subdir" / "nested.txt").write_text("nested content")
+    return src
 
 
 @pytest.fixture
-def event_loop():
-    """Create a trio event loop for async tests."""
-    loop = trio.new_event_loop()
-    yield loop
-    loop.close()
+def layer_dir(tmp_path):
+    """Create a temporary directory for layer files."""
+    d = tmp_path / "layers"
+    d.mkdir()
+    return d
