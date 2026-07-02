@@ -103,6 +103,7 @@ class StackedFS(Operations):
         attr = self._build_attr(path)
         if attr is None:
             raise FUSEError(errno.ENOENT)
+        attr.st_ino = inode
         attr = self.layer_chain.post_getattr(path, attr)
         return attr
 
@@ -210,7 +211,10 @@ class StackedFS(Operations):
             fobj.close()
             real = self._real_path(new_path)
             real.parent.mkdir(parents=True, exist_ok=True)
-            fobj = real.open("r+b")
+            try:
+                fobj = real.open("r+b")
+            except FileNotFoundError:
+                fobj = real.open("w+b")
             self._open_files[fh] = (fobj, new_path)
 
         fobj.seek(off)
@@ -441,8 +445,11 @@ def mount(source_path: str, mount_point: str, layers: list[str],
     """Mount a layered FUSE filesystem."""
     from .layers import load_layers, LayerChain
 
+    resolved = str(Path(source_path).resolve())
+    os.environ["STACKEDFS_SOURCE"] = resolved
+
     chain = LayerChain(load_layers(layers))
-    fs = StackedFS(source_path, chain)
+    fs = StackedFS(resolved, chain)
 
     opts = pyfuse3.default_options
     if debug:

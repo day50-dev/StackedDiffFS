@@ -229,6 +229,57 @@ Logs every filesystem operation to stderr. Useful for debugging and understandin
 stackedfs mount -l examples/echo_layer.py /home/user/project /mnt/test
 ```
 
+### merge_layer.py — *killer feature*
+
+Multi-agent overlay filesystem with conflict detection. Mirrors the original StackedDiffFS functionality as a layer.
+
+Each agent gets their own overlay directory (`agents/<AGENT_ID>/`). The layer merges these with a shared `base/` directory. Writes go to the active agent's overlay; reads show the merged view with agent changes taking priority.
+
+Conflicts are detected when a file's base content changes between read and write — the layer records the conflict and still allows the write to proceed.
+
+```
+stackedfs mount -l examples/merge_layer.py /path/to/repo /mnt/point
+```
+
+**Repository layout:**
+```
+repo/
+├── base/              # original files (shared)
+│   ├── utils.py
+│   └── config.json
+├── agents/            # per-agent overlays
+│   ├── claude/
+│   │   ├── utils.py   # claude's version
+│   │   └── notes.txt  # only claude sees this
+│   └── cline/
+│       └── utils.py   # cline's version
+└── agents.json        # (optional) agent metadata
+```
+
+**Example scenario — two agents on the same project:**
+
+```bash
+# Terminal 1 — Claude
+export AGENT_ID=claude
+stackedfs mount -l examples/merge_layer.py /path/to/repo /mnt/project
+echo "def claude_refactor(): pass" >> /mnt/project/utils.py
+
+# Terminal 2 — Cline
+export AGENT_ID=cline
+stackedfs mount -l examples/merge_layer.py /path/to/repo /mnt/project
+echo "def cline_feature(): pass" >> /mnt/project/utils.py
+```
+
+Each agent writes to their own overlay — neither overwrites the other. Both see the merged view through their mount point.
+
+**Conflict detection:**
+```python
+# merge_layer records conflicts in a module-level list
+# Check after a session:
+from examples.merge_layer import _conflicts
+print(_conflicts)
+```
+
 ## Testing
 
 ```bash
@@ -243,6 +294,7 @@ pytest -v
   - Layer loading and hook dispatch
   - LayerChain ordering (forward/reverse)
   - Secrets layer example behavior
+  - Merge layer (overlay resolution, merged readdir, agent writes, conflict detection)
   - FUSE operations (getattr, lookup, readdir, open, read, write, create, unlink, mkdir, rmdir, rename)
   - FUSE operations with active layers
 
