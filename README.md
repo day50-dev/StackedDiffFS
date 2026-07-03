@@ -6,14 +6,31 @@ StackedFS is a FUSE-based filesystem that mirrors a real directory through a con
 
 ## Rationale
 
-AI agents often need to read sensitive files (`.env`, configs with secrets, API keys) during development. StackedFS makes it possible to surface a **sanitized view** of a real directory by running file data through a layer chain:
+StackedFS solves two problems at once — **multi-agent file isolation** and **transparent content transformation** — through a single abstraction: pluggable layers.
+
+### Multi-Agent Merge (the killer feature)
+
+When multiple AI agents modify the same files, merge conflicts are inevitable. StackedFS's `merge_layer.py` gives each agent its own overlay directory. Writes go to the active agent's overlay; reads merge base + agent. No two agents ever overwrite each other:
+
+```bash
+export AGENT_ID=claude
+stackedfs mount -l examples/merge_layer.py /project /mnt
+echo "claude's change" >> /mnt/shared.py   # goes to agents/claude/
+
+# In another terminal:
+export AGENT_ID=cline
+stackedfs mount -l examples/merge_layer.py /project /mnt
+echo "cline's change" >> /mnt/shared.py     # goes to agents/cline/
+```
+
+### Content Transformation
+
+Beyond isolation, layers can intercept and transform file data on the fly — redact secrets before an agent reads a `.env` file, log every access, filter directory listings, or redirect paths.
 
 - A **secrets layer** replaces real credentials with substitutes on-the-fly
-- A **logging layer** records every filesystem access
+- A **logging layer** records every filesystem access  
 - A **filter layer** can hide or redirect certain paths
 - Layers compose — chain them together for powerful pipelines
-
-Beyond security, layers open the door to exposing other datastores as filesystem primitives (e.g., a Redis key-value store as a `/redis/` directory, or an agent's conversational context as editable files).
 
 ## How It Works
 
@@ -34,10 +51,12 @@ Pre-hooks run forward through the chain (outermost first); post-hooks run in rev
 
 ## Features
 
-- **Mirror any directory** through a FUSE mount point
+- **Multi-agent merge overlay** — `merge_layer.py` gives each agent isolated writes while presenting a unified merged view
+- **Conflict detection** — automatically flags when base content changes between a read and write
 - **Pluggable Python layers** — each layer is a `.py` file with optional hook functions
 - **Pre/post hook model** — transform paths, filter data, intercept operations
-- **Dynamic loading** — layers loaded at mount time via `-l` flag or JSON config
+- **Mirror any directory** through a FUSE mount point
+- **Dynamic loading** — layers loaded at mount time via `-l` flag or JSON config  
 - **Composable** — multiple layers chain together in order
 - **FUSE-based** — works with any tool that reads files through the mounted filesystem
 
@@ -237,6 +256,10 @@ Each agent gets their own overlay directory (`agents/<AGENT_ID>/`). The layer me
 
 Conflicts are detected when a file's base content changes between read and write — the layer records the conflict and still allows the write to proceed.
 
+Requires two environment variables (set automatically by `stackedfs mount`):
+- `STACKEDFS_SOURCE` — path to the repository root
+- `AGENT_ID` — which agent's overlay is active
+
 ```
 stackedfs mount -l examples/merge_layer.py /path/to/repo /mnt/point
 ```
@@ -279,6 +302,15 @@ Each agent writes to their own overlay — neither overwrites the other. Both se
 from examples.merge_layer import _conflicts
 print(_conflicts)
 ```
+
+## Environment Variables
+
+| Variable | Used By | Description |
+|----------|---------|-------------|
+| `AGENT_ID` | `merge_layer` | Selects the active agent overlay (`agents/<AGENT_ID>/`) |
+| `STACKEDFS_SOURCE` | Any layer | Absolute path to the mounted source directory (set automatically by `stackedfs mount`) |
+
+`STACKEDFS_SOURCE` is set by `stackedfs mount` before layers are loaded, so any layer can read it via `os.environ.get("STACKEDFS_SOURCE")` to discover where the source directory lives.
 
 ## Testing
 
